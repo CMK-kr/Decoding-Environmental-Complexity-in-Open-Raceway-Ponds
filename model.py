@@ -1,9 +1,7 @@
-import os
 import random
 
 import numpy as np
 import tensorflow as tf
-
 from tensorflow.keras import optimizers
 from tensorflow.keras.layers import (
     Concatenate,
@@ -21,17 +19,37 @@ from tensorflow.keras.layers import (
 )
 from tensorflow.keras.models import Model
 
+from config import BEST_PARAMS
+
+
+INTEGER_PARAM_KEYS = tuple(key for key in BEST_PARAMS if key not in {"dropout", "lr"})
+
 
 def set_seed(seed=42):
-    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
-    try:
-        tf.keras.utils.set_random_seed(seed)
-    except AttributeError:
-        tf.random.set_seed(seed)
-    except Exception:
-        tf.random.set_seed(seed)
+    tf.random.set_seed(seed)
+
+
+def normalize_best_params(best_params=None):
+    raw_params = BEST_PARAMS.copy() if best_params is None else dict(best_params)
+    normalized = BEST_PARAMS.copy()
+    normalized.update(raw_params)
+
+    for key in INTEGER_PARAM_KEYS:
+        normalized[key] = int(normalized[key])
+        if normalized[key] <= 0:
+            raise ValueError("{} must be a positive integer.".format(key))
+
+    normalized["dropout"] = float(normalized["dropout"])
+    normalized["lr"] = float(normalized["lr"])
+    return normalized
+
+
+def smape_metric_np(y_true, y_pred, eps=1e-8):
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    return float(np.mean(200.0 * np.abs(y_pred - y_true) / (np.abs(y_true) + np.abs(y_pred) + eps)))
 
 
 def smape_loss_tf(y_true, y_pred, eps=1e-6):
@@ -46,96 +64,108 @@ def huber_smape_loss(alpha=0.05, delta=1.0):
     def loss(y_true, y_pred):
         huber = huber_fn(y_true, y_pred)
         smape = smape_loss_tf(y_true, y_pred) / 100.0
-        return huber + alpha * smape
+        return huber + (alpha * smape)
 
     return loss
 
 
-def build_multimodal_model(input_shape0, input_shape1, params):
-    filters1 = params["filters1"]
-    filters2 = params["filters2"]
-    filters3 = params["filters3"]
-    filters4 = params["filters4"]
-    filters5 = params["filters5"]
-    filters6 = params["filters6"]
-    dropout = params["dropout"]
-    lr = params["lr"]
+def build_model(input_shape0, input_shape1, best_params=None):
+    params = normalize_best_params(best_params)
 
-    def x0_branch(input_shape):
-        x = input_tensor = Input(shape=input_shape)
+    def build_x0_branch(input_shape):
+        x = input_ = Input(shape=input_shape)
 
-        def dense_stack(tensor):
-            tensor = Dense(units=filters1, activation="relu")(tensor)
-            tensor = Dense(units=filters2, activation="relu")(tensor)
-            tensor = Dense(units=filters2, activation="relu")(tensor)
-            tensor = Dense(units=filters3, activation="relu")(tensor)
+        def dense_feature_block(tensor):
+            tensor = Dense(units=params["x0_dense1"], activation="relu")(tensor)
+            tensor = Dense(units=params["x0_dense2"], activation="relu")(tensor)
+            tensor = Dense(units=params["x0_dense3"], activation="relu")(tensor)
+            tensor = Dense(units=params["x0_dense4"], activation="relu")(tensor)
             return tensor
 
-        x0 = dense_stack(x)
-        x1 = dense_stack(x)
-        merged = Concatenate()([x0, x1])
-        merged = Dropout(dropout)(merged)
+        left = dense_feature_block(x)
+        right = dense_feature_block(x)
+        merged = Concatenate()([left, right])
+        merged = Dropout(params["dropout"])(merged)
 
-        def temporal_stack(tensor):
-            tensor = Conv1D(filters=filters4, kernel_size=3, activation="relu", padding="same")(tensor)
+        def conv_feature_block(tensor):
+            tensor = Conv1D(filters=params["x0_conv1"], kernel_size=3, activation="relu", padding="same")(tensor)
             tensor = MaxPool1D()(tensor)
-            tensor = Conv1D(filters=filters5, kernel_size=3, activation="relu", padding="same")(tensor)
+            tensor = Conv1D(filters=params["x0_conv2"], kernel_size=3, activation="relu", padding="same")(tensor)
             tensor = MaxPool1D()(tensor)
-            tensor = Conv1D(filters=filters6, kernel_size=3, activation="relu", padding="same")(tensor)
-            tensor = Conv1D(filters=filters6, kernel_size=3, activation="relu", padding="same")(tensor)
+            tensor = Conv1D(filters=params["x0_conv3"], kernel_size=3, activation="relu", padding="same")(tensor)
+            tensor = Conv1D(filters=params["x0_conv4"], kernel_size=3, activation="relu", padding="same")(tensor)
 
             gap = GlobalAveragePooling1D()(tensor)
-            dense = Dense(max(filters6 // 8, 4), activation="relu")(gap)
-            dense = Dense(filters6, activation="sigmoid")(dense)
-            attention = Multiply()([tensor, Reshape((1, filters6))(dense)])
-            attention = Dense(units=filters4, activation="relu")(attention)
-            return Concatenate()([tensor, attention])
+            attention = Dense(params["x0_attn_hidden"], activation="relu")(gap)
+            attention = Dense(params["x0_attn_channels"], activation="sigmoid")(attention)
 
-        x0 = temporal_stack(merged)
-        x1 = temporal_stack(merged)
-        output = Concatenate()([x0, x1])
+            attended_input = tensor
+            if params["x0_attn_channels"] != params["x0_conv4"]:
+                attended_input = Conv1D(
+                    filters=params["x0_attn_channels"],
+                    kernel_size=1,
+                    activation="relu",
+                    padding="same",
+                )(attended_input)
+
+            attended = Multiply()([attended_input, Reshape((1, params["x0_attn_channels"]))(attention)])
+            attended = Dense(units=params["x0_proj"], activation="relu")(attended)
+            return Concatenate()([tensor, attended])
+
+        left = conv_feature_block(merged)
+        right = conv_feature_block(merged)
+        output = Concatenate()([left, right])
         output = GlobalAveragePooling1D()(output)
-        return Model(inputs=input_tensor, outputs=output)
+        return Model(inputs=input_, outputs=output)
 
-    def x1_branch(input_shape):
-        x = input_tensor = Input(shape=input_shape)
+    def build_x1_branch(input_shape):
+        x = input_ = Input(shape=input_shape)
 
-        def conv_stack(tensor):
-            tensor = Conv2D(filters1, (3, 3), activation="relu", padding="same")(tensor)
+        def conv_feature_block(tensor):
+            tensor = Conv2D(params["x1_conv1"], (3, 3), activation="relu", padding="same")(tensor)
             tensor = MaxPool2D()(tensor)
-            tensor = Conv2D(filters2, (3, 3), activation="relu", padding="same")(tensor)
+            tensor = Conv2D(params["x1_conv2"], (3, 3), activation="relu", padding="same")(tensor)
             tensor = MaxPool2D()(tensor)
-            tensor = Conv2D(filters3, (3, 3), activation="relu", padding="same")(tensor)
-            tensor = Conv2D(filters3, (3, 3), activation="relu", padding="same")(tensor)
+            tensor = Conv2D(params["x1_conv3"], (3, 3), activation="relu", padding="same")(tensor)
+            tensor = Conv2D(params["x1_conv4"], (3, 3), activation="relu", padding="same")(tensor)
 
             gap = GlobalAveragePooling2D()(tensor)
-            dense = Dense(max(filters3 // 8, 4), activation="relu")(gap)
-            dense = Dense(filters3, activation="sigmoid")(dense)
-            attention = Multiply()([tensor, Reshape((1, 1, filters3))(dense)])
-            attention = Dense(units=filters4, activation="relu")(attention)
-            return Concatenate()([tensor, attention])
+            attention = Dense(params["x1_attn_hidden"], activation="relu")(gap)
+            attention = Dense(params["x1_attn_channels"], activation="sigmoid")(attention)
 
-        x0 = conv_stack(x)
-        x1 = conv_stack(x)
-        output = Concatenate()([x0, x1])
+            attended_input = tensor
+            if params["x1_attn_channels"] != params["x1_conv4"]:
+                attended_input = Conv2D(
+                    params["x1_attn_channels"],
+                    (1, 1),
+                    activation="relu",
+                    padding="same",
+                )(attended_input)
+
+            attended = Multiply()([attended_input, Reshape((1, 1, params["x1_attn_channels"]))(attention)])
+            attended = Dense(units=params["x1_proj"], activation="relu")(attended)
+            return Concatenate()([tensor, attended])
+
+        left = conv_feature_block(x)
+        right = conv_feature_block(x)
+        output = Concatenate()([left, right])
         output = GlobalAveragePooling2D()(output)
-        return Model(inputs=input_tensor, outputs=output)
+        return Model(inputs=input_, outputs=output)
 
-    def gated_fusion(x0_feat, x1_feat):
-        merged = Concatenate()([x0_feat, x1_feat])
-        gate = Dense(int(merged.shape[-1]), activation="sigmoid")(merged)
-        return Multiply()([merged, gate])
+    def gated_fusion(x0_features, x1_features):
+        concatenated = Concatenate()([x0_features, x1_features])
+        gate = Dense(int(concatenated.shape[-1]), activation="sigmoid")(concatenated)
+        return Multiply()([concatenated, gate])
 
-    x0_model = x0_branch(input_shape0)
-    x1_model = x1_branch(input_shape1)
-
+    x0_model = build_x0_branch(input_shape0)
+    x1_model = build_x1_branch(input_shape1)
     fused = gated_fusion(x0_model.output, x1_model.output)
     output = Dense(units=1)(fused)
 
     model = Model(inputs=[x0_model.input, x1_model.input], outputs=output)
     model.compile(
-        optimizer=optimizers.Adam(learning_rate=lr),
+        optimizer=optimizers.Adam(learning_rate=params["lr"]),
         loss=huber_smape_loss(alpha=0.05, delta=1.0),
-        metrics=["mse", "mae"],
+        metrics=["mse", "mae", tf.keras.metrics.RootMeanSquaredError(name="rmse")],
     )
     return model
