@@ -1,45 +1,72 @@
-# GitHub Release Pipeline
+# Final Release Scripts
 
-This folder contains a simplified preprocessing and training pipeline for the microalgae prediction model.
+This directory contains the cleaned final pipeline for the best-performing setting.
+You can publish this directory alone. The default raw CSV path is `./sample_df.csv`.
 
-## Included files
+- Best combination: `PC3_CL6`
+- Holdout split: `StratifiedShuffleSplit`, `test_size=0.2`, `seed=46`
+- Best hyperparameters: fixed in `config.py`
+- Final training target: `X0 + X1` only
 
-- `config.py`: fixed feature definitions, best PCA/K settings, and best model hyperparameters
-- `preprocessing.py`: converts the raw CSV into `X0.npy`, `X1.npy`, and `y.npy`
-- `model.py`: multimodal model definition
-- `train.py`: single train/validation/test split training script
-- `run_pipeline.py`: runs preprocessing and training end-to-end
+## 파일
 
-## Fixed settings
-
-- PCA components: `12`
-- K-means clusters: `17`
-- Best model hyperparameters:
-  - `filters1=384`
-  - `filters2=544`
-  - `filters3=416`
-  - `filters4=416`
-  - `filters5=160`
-  - `filters6=160`
-  - `dropout=0.23`
-  - `lr=0.0003658726548219748`
+- `config.py`
+  - Final experiment constants, best `PC*_CL*` combination, 그리고 tuned hyperparameters.
+- `preprocess_dataset.py`
+  - Generates `X0.npy`, `X1.npy`, `y.npy` 및 `sample_ids.npy` from `sample_df.csv`.
+- `model.py`
+  - Final multimodal model definition and custom loss function.
+- `train_model.py`
+  - Trains the final `X0 + X1` model with a single holdout split.
 
 ## Usage
 
-Run preprocessing only:
+### 1. Preprocess the dataset
 
 ```bash
-python -m github_release.preprocessing --csv-file "path/to/sample_df.csv" --output-root "path/to/output"
+python preprocess_dataset.py
 ```
 
-Run training only:
+Default input:
+
+- `./sample_df.csv`
+
+Default output:
+
+- `./artifacts/PC3_CL6`
+
+### 2. Train the model
+
+Run the final multimodal model:
 
 ```bash
-python -m github_release.train --dataset-dir "path/to/output/PC12_CL17" --output-dir "path/to/train_output"
+python train_model.py --dataset-dir ./artifacts/PC3_CL6
 ```
 
-Run the full pipeline:
+Default training output:
 
-```bash
-python -m github_release.run_pipeline --csv-file "path/to/sample_df.csv" --work-dir "path/to/work_dir"
-```
+- `./artifacts/training/x0_x1_single_holdout`
+
+## Generated Outputs
+
+### Preprocessing
+
+- `X0.npy`
+- `X1.npy`
+- `y.npy`
+- `sample_ids.npy`
+- `group_log.csv`
+- `dataset_summary.csv`
+
+### 훈련
+
+- `train_metrics.csv`
+- `test_metrics.csv`
+- `split_metrics.csv`
+- `train_predictions.csv`
+- `test_predictions.csv`
+- `keras_history.csv`
+- `train_assignment.csv`
+- `test_assignment.csv`
+- `run_config.json`
+- `training_summary.csv`
